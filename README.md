@@ -99,17 +99,14 @@ Smaller cleanups: 3-digit revenue codes are padded to 4, provider group ids are 
 
 ## Design decisions and tradeoffs
 
-| Decision | Why | The cost, and when I'd change it |
-| --- | --- | --- |
-| **Keep everything in memory, no database** | The brief allows it, the data fits in about 150 MB, searches take well under a millisecond, and it runs with one command | Data is reloaded on every start (a few seconds), and only one server can run. Next step: Postgres using the same tables. |
-| **Read the file piece by piece** | Memory stays low no matter how large the file is | More code than loading it in one call |
-| **Separate tables linked by position** | One provider group can have about 1,200 NPIs; storing it once instead of per rate saves a lot of memory. It also maps directly onto SQL. | Building a response takes a few extra lookups |
-| **NPI and EIN point to provider groups, not rates** | The indexes stay small, and one match covers all of that group's prices | One extra check per candidate rate |
-| **Build the store fully, then swap it in** | A search never sees half-loaded data, and no locking is needed | A future live reload would briefly hold two copies in memory |
-| **Prices in whole cents** | Exact money math, sorting and medians | Converted back to dollars for display |
-| **Search facility rates by procedure code, and remove duplicates** | Without the first, most rates are missing; without the second, counts are badly wrong | Relies on a free-text field, so every facility rate is clearly labelled |
-| **Load one file by default** | Faster startup; the index still decides which file is used | `-sources all` loads both |
-| **No Redis, Kafka or queue** | The data is already in the server's memory and changes monthly | A job queue makes sense for loading many insurers on a schedule |
+- **In memory, no database.** The brief allows it, the data fits in about 150 MB, and searches take well under a millisecond. The main tradeoff: data reloads on every start (a few seconds) and only one server can run. Postgres with the same tables is the next step.
+- **Read the file piece by piece**, so memory stays low however large the file is.
+- **Separate tables linked by position.** A provider group with about 1,200 NPIs is stored once instead of on every rate, and the tables map directly onto SQL.
+- **NPI and EIN lookups point to provider groups, not rates**, which keeps those indexes small.
+- **Build the data fully, then swap it in**, so a search never sees half-loaded data.
+- **Prices in whole cents**, for exact sorting and medians.
+- **Find facility rates by procedure code, and remove duplicates.** This relies on a free-text field, so facility rates are clearly labelled.
+- **No Redis, Kafka or queue.** The data is already in memory and changes monthly.
 
 ### Assumptions
 
