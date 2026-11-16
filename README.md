@@ -1,170 +1,254 @@
-[![CMS Transparency in Coverage](resources/images/TiC_banner.png?raw=true "Transparency in Coverage")](https://www.cms.gov/healthplan-price-transparency)
+# Price Transparency Explorer
 
-# Transparency in Coverage
-This is the technical implementation guide for the machine readable files as required by the [Transparency in Coverage](https://www.federalregister.gov/documents/2020/11/12/2020-24591/transparency-in-coverage) final rules (85 FR 72158). 
+Search negotiated in-network rates from a CMS **Transparency in Coverage** payer file by billing code, optionally narrowed to a provider by NPI or EIN.
 
-If you are looking for the technical implementation guide for the machine readable files required by the [Hospital Price Transparency](https://www.cms.gov/priorities/key-initiatives/hospital-price-transparency) final rules (45 CFR 180), please go to https://github.com/CMSgov/hospital-price-transparency.
+The app reads the Fidelis (Centene) table-of-contents index, picks the in-network rate file it references, stream-parses that file into a normalized in-memory store, and serves a small JSON API and a Vue UI on one port.
 
-Overview
-========
+- **Backend:** Go standard library only, with no third-party dependencies.
+- **Frontend:** Vue 3 + TypeScript + Vite, with no UI or state library.
+- **Speed:** a search takes 0.05–0.34 ms server-side (benchmarked on the real 180k-price file).
 
-This repository contains a set of schemas describing a data format (example implementations are encoded as JSON and XML) for the Transparency in Coverage final rule.
-All machine-readable files must conform to a non-proprietary, open standards format that is platform independent and made available to the public without restrictions that would impede the re-use of that information.
+> The original CMS implementation guide that came with this repository is kept at [`CMS_GUIDE.md`](CMS_GUIDE.md). Its schemas and examples in [`schemas/`](schemas) and [`examples/`](examples) are used by the parser tests.
 
-**Consistent with the Departments’ August 20, 2021 guidance (see below “Guidance” section), the Departments have not promulgated any final guidance with respect to the form and manner for the Prescription Drug File.**
+---
 
-**Any material currently or previously published on this site with respect to the form and manner of the Prescription Drug File has been superseded and is not guidance of the Departments.**
+## Quick start
 
-Background
-==========
+**Requirements:** Go 1.24 or newer, and Node 20.19+ or 22.12+.
 
-The Departments of the Treasury, Labor, and Health and Human Services (the Departments) have issued the Transparency in Coverage final rules (85 FR 72158) on November 12, 2020. The final rules require non-grandfathered group health plans and health insurance issuers in the individual and group markets (plans and issuers) to disclose certain pricing information. Under the final rules a plan or issuer must disclose in-network negotiated rates, and billed and out-of-network allowed through two machine-readable files posted on an internet website.
+```bash
+# 1. Build the frontend once
+cd web
+npm ci
+npm run build
 
-Plans and issuers are required to make these files public for plan or policy years beginning on or after July 1, 2022.
+# 2. Run the server (it serves the API and the built UI)
+cd ../server
+go run ./cmd/explorer
 
-Keeping Up To Date
-==================
+# 3. Open http://localhost:8080
+```
 
-Github allows for people to track and keep up-to-date with any changes for any repository. If you wish to follow and track the changes that happen on this repo, please leverage the "Watch" feature found at the top of the repository and select "All activity". This will email the user that has "watched" the specific repository.
+On first start the server downloads the index and the 89 MB `fidelis-ex` in-network file into `server/data/cache/`, then indexes it. The UI shows a progress banner meanwhile, and searches are ready in about 4 seconds on a fast connection. Later starts revalidate the cache with ETag (HTTP 304) and skip the download.
 
-Guidance
-========
+### Development (hot reload)
 
-Transparency in Coverage rule guidance is released on [CMS'](https://www.cms.gov) website. You can find recently released guidance here:
-* [https://www.cms.gov/CCIIO/Resources/Fact-Sheets-and-FAQs#Affordable_Care_Act](https://www.cms.gov/CCIIO/Resources/Fact-Sheets-and-FAQs#Affordable_Care_Act)
-* [https://www.cms.gov/CCIIO/Resources/Fact-Sheets-and-FAQs/Downloads/FAQs-Part-49.pdf](https://www.cms.gov/CCIIO/Resources/Fact-Sheets-and-FAQs/Downloads/FAQs-Part-49.pdf)
-* [https://www.cms.gov/sites/default/files/2022-04/FAQ-Affordable-Care-Act-Implementation-Part-53.pdf](https://www.cms.gov/sites/default/files/2022-04/FAQ-Affordable-Care-Act-Implementation-Part-53.pdf)
-* [https://www.cms.gov/files/document/faqs-about-affordable-care-act-implementation-part-61.pdf](https://www.cms.gov/files/document/faqs-about-affordable-care-act-implementation-part-61.pdf)
-* [https://www.cms.gov/files/document/aca-faqs-part-70.pdf](https://www.cms.gov/files/document/aca-faqs-part-70.pdf)
+```bash
+cd server && go run ./cmd/explorer      # terminal 1: API on :8080
+cd web && npm run dev                   # terminal 2: UI on :5173, proxies /api to :8080
+```
 
-Developer Documentation
-=======================
+### Tests
 
-Transport mechanism - HTTPS
---------------------------
+```bash
+cd server && go test ./...              # parser, normalization, search, API, fetch/cache
+cd web && npm test                      # validation, URL state, stale-request handling
+cd web && npm run typecheck
 
-All machine-readable files must be made available via HTTPS.
+# Benchmark against the real file (absolute path to the cached download)
+cd server && PRICE_BENCH_FILE=$PWD/data/cache/2026-08-31_centene-management-company-llc_fidelis-ex_in-network.json \
+  go test ./internal/search -run '^$' -bench BenchmarkSearchReal
+```
 
-Content type - Non-Proprietary, Open Format
--------------------
+### Configuration
 
-There are plenty of great formats to work with that will meet the needs for Transparency in Coverage:
-* [JSON](https://www.json.org/)
-* [XML](http://www.xml.org/)
-* [YAML](https://yaml.org/)
+Every setting has a flag and an environment variable. Defaults are relative to `server/`.
 
-Examples of proprietary formats that do *not* meet this definition would be:
-* [PDF](https://en.wikipedia.org/wiki/PDF)
-* [XLS/XLSX](https://en.wikipedia.org/wiki/Microsoft_Excel#File_formats) 
+| Flag | Env | Default | Purpose |
+| --- | --- | --- | --- |
+| `-sources` | `SOURCES` | `fidelis-ex` | In-network files to load, by short name, or `all`. `fidelis-es` is the second file. |
+| `-index-url` | `INDEX_URL` | the Centene index URL | Table-of-contents index; this is the source of truth for file URLs |
+| `-index-file` | `INDEX_FILE` | `data/index/2026-08-31_fidelis_index.json` | Bundled copy, used if the URL is unreachable |
+| `-addr` | `ADDR` | `:8080` | Listen address |
+| `-cache-dir` | `CACHE_DIR` | `data/cache` | Download cache |
+| `-web-dir` | `WEB_DIR` | `../web/dist` | Built UI to serve (skipped if missing) |
+| `-parallel` | `PARALLEL` | `2` | Files ingested concurrently |
+| `-cors-origins` | `CORS_ORIGINS` | `http://localhost:5173` | Origins allowed for local development |
+| `-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
-Public Discoverability
-----------------------
+`go run ./cmd/explorer -sources all` loads both Fidelis files: about 540k prices, 4.7 s, and a 148 MB process.
 
-These machine-readable files must be made available to the public without restrictions that would impede the re-use of that information.
+> **Windows note:** Smart App Control, when it is on, blocks newly compiled, unsigned executables, and that includes every `go build` and `go test` binary. If you hit "An Application Control policy has blocked this file", run the backend in WSL2 (`go` works unchanged there) instead of turning the protection off. The frontend tooling is unaffected.
 
-The location of the these URLs *must* be provided over HTTPS to ensure the integrity of the data.
+---
 
-Robots.txt
-----------
+## How it works
 
-To allow for search engine discoverability, neither a `robots.txt` file nor `meta` tag on the page where the files are hosted will have rules such that give instructions to web crawlers to not index the page.
+```
+ centene.com                         Go binary (one process)
+┌──────────────┐   ┌───────────────────────────── ingest, once at startup ─────────────────────────────┐
+│ index JSON   │──▶│ toc: resolve ──▶ fetch: cache, ──▶ ingest: stream-parse ──▶ merge + build indexes │
+│ in-network   │   │ index, pick      ETag, retry,      (1 goroutine per file)                          │
+│ files        │   │ files            sha256                                         │ atomic swap     │
+└──────────────┘   └─────────────────────────────────────────────────────────────────▼─────────────────┘
+                                                                         ┌─────────────────────────┐
+                    ┌──────────────┐  JSON   ┌───────────┐   lock-free   │ immutable Store         │
+                    │ Vue SPA      │◀──────▶│ api       │──▶ search ───▶│ tables + ByCode/ByNPI/  │
+                    │ (URL = state)│         │ net/http  │    (pure)     │ ByEIN indexes           │
+                    └──────────────┘         └───────────┘               └─────────────────────────┘
+```
 
-This is typically follows the format of `<meta name="robots" content="noindex, nofollow">` or for a `robots.txt` file using the `Disallow` directive.
+1. **Resolve.** [`toc`](server/internal/toc) reads the index (remote first, bundled copy as fallback). It lists each `reporting_structure` with its plans and in-network file URL, then selects files by short name: `fidelis-ex` (Ambetter exchange plans) or `fidelis-es` (Essential Plan).
+2. **Fetch.** [`fetch`](server/internal/fetch) streams each file to disk, hashing it as it writes. It revalidates with ETag and Last-Modified, retries with backoff, and falls back to the cached copy if the network fails.
+3. **Parse.** [`ingest`](server/internal/ingest) walks the file with `encoding/json.Decoder` tokens and decodes one provider reference or one `in_network` item at a time. Memory stays flat regardless of file size. Each file gets its own goroutine and builder.
+4. **Normalize and index.** Rows go into normalized tables (below). [`store`](server/internal/store) then builds the lookup indexes and is published with `atomic.Pointer`, so readers never take a lock and never see a half-built store.
+5. **Serve.** [`api`](server/internal/api) validates the request and calls [`search`](server/internal/search), which is plain Go with no HTTP, so it is unit-testable and benchmarkable. It returns results grouped by provider, with stats and source traceability.
 
-Special Data Types
-------------------
+The HTTP server starts immediately. Until the data is ready, `/api/v1/rates` answers `503` with `Retry-After`, and `/api/v1/status` reports per-file progress, which the UI shows as a banner.
 
-Dates should be strings in [ISO 8601 format](https://en.wikipedia.org/wiki/ISO_8601) (i.e. YYYY-MM-DD).
+### Data model
 
-Different Machine-Readable Files
---------------------------------
+The nested CMS file is flattened into normalized tables. Every key is an integer equal to the row's position in its slice, so a join is an array access.
 
-There are two required machine-readable files associated with Transparency in Coverage:
-* [In-Network Negotiated Rates](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/in-network-rates)
-* [Out-Of-Network Allowed Amounts](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/allowed-amounts)
+| Table | One row per | Key fields |
+| --- | --- | --- |
+| `source_file` | ingested file | URL, `last_updated_on`, SHA-256, byte size, status, counts |
+| `reporting_plan` | index plan entry | surrogate key (HIOS `plan_id` is **not** unique) |
+| `provider_group` | (file, `provider_group_id`) | ids are only unique within a file, so the key is global |
+| `provider_entity` | TIN block in a group | EIN as 9 digits, NPIs as `uint64`, `tin_only` flag |
+| `billing_item` | `in_network` element | normalized code (RC padded to 4 digits), raw code, description |
+| `negotiated_rate` | price × provider group | `int64` cents, enums, interned modifier and place-of-service sets; 40 bytes per row |
 
-**In-Network Negotiated Rates File**
-Under the finalized rules, a plan or issuer must disclose in-network provider negotiated rates for all items and services through a machine-readable file.
+| Index | Shape | Why |
+| --- | --- | --- |
+| `ByCode` | code → `{Direct, Linked}` sorted rate keys | The code is required, so it is always the first and most selective lookup |
+| `ByNPI`, `ByEIN` | identifier → sorted provider-group keys | Maps to groups, not rates: one group can hold about 1,200 NPIs, and indexing every NPI × price would explode |
+| `Codes` | sorted slice | Prefix typeahead by binary search |
 
-**Out-Of-Network Allowed Amounts File**
-Under the finalized rules, a plan or issuer must disclose certain data elements to the public, including the billed and allowed amounts for out-of-network providers, through a machine-readable file.
+**Search** = look up the code's postings, build the allowed group set from NPI ∩ EIN, then make one pass over candidates checking each group by binary search. Stats are computed over all matches, and only the returned page is hydrated with names and NPIs.
 
-The associated names for those files are:
-* `in-network-rates`
-* `allowed-amounts`
+### API
 
-There is also one optional machine-readable file that can be leveraged to significantly decrease file sizes of the required machine-readable files:
-* [Table of Contents](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/table-of-contents)
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/rates?code=45380&npi=…&ein=…` | Search. `code` is required. `npi` and `ein` accept repeated or comma-separated values (NPI AND EIN must match the same provider group). Optional: `match=all\|direct\|linked`, `billing_class`, `source`, `sort=rate_asc\|rate_desc\|provider`, `page`, `page_size` (≤100). |
+| `GET /api/v1/codes?prefix=4538` | Typeahead with descriptions and rate counts |
+| `GET /api/v1/sources` | Index metadata, loaded files (date, checksum, counts), and plans grouped by HIOS id |
+| `GET /api/v1/status` | Ingest state (`loading`, `ready`, `degraded` or `failed`) with per-file progress |
 
-**Table of Contents File**
-The Table of Contents file can be leveraged to combine common negotiated rates across multiple in-network files. By breaking out [common negotiated rates into separate files](https://github.com/CMSgov/price-transparency-guide/blob/master/README.md#multiple-plans-per-file) to use in multiple In-Network files, plans can avoid having to duplicate data.
+Responses use integer cents. An empty result carries a `hint` that says why: `code_not_found`, `provider_not_found`, `no_rates_for_provider` or `no_rates_match_filters`. Errors share one envelope with field-level details:
 
-Timing Updates For Machine-Readable Files
------------------------------------------
-According to the [TiC Final Rules](https://www.federalregister.gov/d/2020-24591/p-1516) and the schema requirements, plans and issuers are required to update the machine-readable files monthly and populate the attribute `last_updated_on`. The Departments consider “monthly” to refer to reasonably consistent periods of approximately 30 days, but are not specifying a particular day of the month.
+```json
+{ "error": { "code": "invalid_query", "message": "…",
+             "fields": [{ "field": "npi", "code": "invalid_npi", "message": "1234567890 fails the NPI check digit." }] } }
+```
 
-File Naming Convention  
--------------------------
-There are scenarios where multiple plans have exactly the same negotiated rates with the same group of providers for the same items and services. This would lead to a large duplication of reporting. Also, there are plans that will be unique in their negotiated rates that would require a separate file.
+Rate responses include `ETag` (the store is immutable, so repeat searches return `304`) and `Server-Timing`, and are gzip-compressed.
 
-The producers of the files have the option to group multiple plans together with the same negotiated data (or allowed amounts). If plans are to be grouped together, a `table-of-contents` file will be required to capture all the different plan data along with a URL location on where to download the appropriate files.
+### Frontend
 
-Payer/Issuers are still allowed to build both in-network and allowed-amount files for a single plan. The naming conventions will be different for each.
+The URL query string is the single source of truth: its keys are the API's parameter names. Searches can therefore be shared and bookmarked, and survive refresh and Back.
 
-For payer or issuer's names that have spaces, those spaces would be replaced with dashes `-`
+- **`SearchView`** owns the state. A submit updates the URL, and the URL change runs the search.
+- **Composables** handle the async work:
+  - `useRateSearch` cancels a stale request with `AbortController` and keeps old results visible, dimmed, while a page or filter loads.
+  - `useCodeSuggest` is a debounced, cached typeahead.
+  - `useStatus` is a single shared poller that runs only while data is loading.
+- **Edge cases handled:**
+  - Validation mirrors the server's rules, including the NPI check digit, EINs with or without the dash, and 3-digit revenue codes. Errors appear next to the field, and the server's field errors land on the same inputs.
+  - Every empty result explains why and offers the next step (suggested codes, "search all providers", "reset filters").
+  - Facility rates have their own badge. Providers matching the NPI or EIN are badged and listed first. Groups with dozens of tax IDs are collapsed.
+  - A "Data source" footer lists the index, each file with its date, checksum and status, and the plans covered.
+- **Layout and accessibility:** responsive, checked at 390 px (rate tables become stacked cards); keyboard-accessible combobox; screen-reader announcements; dark mode.
 
-Only alphanumeric characters are allowed in the file name. No special characters such as `'` are allowed. Special characters are either to be removed completely or replaced with `-`.
+---
 
-#### Single Plan Files
-The following is the required naming standard for each file: `<YYYY-MM-DD>_<payer or issuer name>_<plan name>_<file type name>.<file extension>`
+## What the data actually looks like
 
-For example, the following would be the required naming for CMS building a JSON file:
-* `2020-01-05_cms_medicare_in-network-rates.json`
-* `2020-01-05_cms_medicare_allowed-amounts.json`
+These findings come from profiling the real files, and they drove most of the design.
 
-An example of a plan named `healthcare 100` with an issuer's name `issuer abc` producing a JSON file, the following would be the naming output:
-* `2020-01-05_issuer-abc_healthcare-100_in-network-rates.json`
-* `2020-01-05_issuer-abc_healthcare-100_allowed-amounts.json`
+| Finding | Impact | Handling |
+| --- | --- | --- |
+| **Revenue-code (RC) prices carry the CPT/HCPCS code in `additional_information`** (154k of 180k prices in `fidelis-ex`) | Searching `billing_code` alone misses most facility rates: 45380 has 11 direct rates but 42 facility rates | Each price is indexed under its item code *and* its linked code, and labelled "Facility · RC 0490". Only values shaped like a code are indexed, because CMS defines the field as free text. |
+| **The same facility rate is repeated under many items.** RC 0490 appears as 162 items, each described as a different procedure, and every provider's rate is repeated under all of them. | 45380 showed 6,804 facility rows that are really 42 distinct rates; counts were inflated about 160× and medians were skewed | Index-time deduplication on (code, provider group, price, class, setting, place of service, modifiers, expiration, revenue code) skipped 324,923 duplicate postings. The misleading item description is not shown on facility rates. |
+| RC codes are 3 digits (`"260"`); the standard form is 4 (`"0260"`) | A user typing `0260` finds nothing | Both data and input are normalized to 4 digits |
+| One provider group has up to about 1,200 NPIs and up to 39 tax IDs | Per-NPI rows would multiply memory; the UI cards become very long | Groups are stored once; the cards collapse long lists |
+| `provider_group_id` is unique only within a file | Collisions when loading both files | Keyed globally by (file, id) |
+| 5 groups have `npi: [0]`, and each file has one 9-digit NPI | A bogus "0" NPI; an invalid identifier | `0` becomes a "TIN-level contract" flag; the invalid NPI is skipped and counted on `/status` |
+| `plan_id` repeats across cost-sharing variants (94 entries, 24 ids); one name has a typo ("Ambetter fromFidelis") | Not usable as a key | Surrogate keys; names grouped by HIOS id and kept verbatim |
+| Every `expiration_date` is `9999-12-31`, every `billing_code_type_version` is `"2022"`, every `network_name` is empty | Noise | Stored for traceability; shown as "No end date"; no filters built for them |
+| The rate file's `last_updated_on` (2026-09-02) is later than the index's (2026-08-31) | Which date is "the data date"? | Both are shown, per file |
 
-#### Multiple Plans Per File
-If multiple plans are to be included in a single file, a `table-of-contents` file will be required. The naming standard will be applied to the `table-of-contents` file and both the `in-network` and `allowed-amounts` files will not have any naming standards.
+---
 
-The following is the required naming standard for the `table-of-contents` file: `<YYYY-MM-DD>_<payer or issuer name>_index.<file extension>`
+## Design decisions and tradeoffs
 
-For example, the following would be the required naming for CMS building a JSON file that includes Medicare and Medicaid plans:
-* `2020-01-05_cms_index.json`
+| Decision | Why | Tradeoff / when to revisit |
+| --- | --- | --- |
+| **In-memory store, no database** | Allowed by the brief; about 540k rows fit in about 150 MB; sub-millisecond reads; one command to run | Re-parse on cold start (0.5–3 s here); single instance. Next step: SQLite or Postgres using the same tables. |
+| **Streaming parse** (`json.Decoder` tokens) | Flat memory on files of 100+ MB | More code than `json.Unmarshal`. A faster decoder is an option if parsing becomes the bottleneck. |
+| **Normalized tables + integer keys** | No duplication per NPI; O(1) joins; maps directly to SQL | Hydrating a page costs a few extra lookups |
+| **Filter by provider group, not by rate** | Small indexes; one NPI hit covers every price for that group | One membership check per candidate |
+| **Immutable snapshot + `atomic.Pointer`** | Lock-free, consistent reads; a reload can build a new store and swap it in | Two copies in memory during a reload |
+| **Integer cents, `uint8` enums, interned sets** | Exact money; a 40-byte rate row | Formatting happens at the edges |
+| **Index the linked RC codes, and deduplicate** | Correct coverage *and* correct counts; both are needed | Relies on a free-text field; every match type is labelled in the UI |
+| **Load `fidelis-ex` only by default** | Faster demo start; the index still drives selection | `-sources all` loads both |
+| **URL as UI state; one stateful view** | Shareable, testable, survives refresh | Query parameter names are a public contract |
+| **No Redis, Kafka or queue** | The data is already in process memory, with one producer and one consumer, and it changes monthly | Add a job queue for multi-payer scheduled ingestion, and a shared cache only with several API replicas |
+| **Standard library only (Go)** | Nothing to audit or update; easy to read | A little more code (router patterns, gzip middleware) |
 
-Schema Validator Tool
-=====================
+### Assumptions
 
-CMS developed a [downloadable schema validator tool](https://github.com/CMSgov/price-transparency-guide-validator) that plans and developers can use to assess whether their machine readable files are compliant with the Transparency in Coverage JSON schema. The validator tool and instructions can be accessed here. The tool can be used to validate in-network and allowed amount files, as well as table of contents files. Note that the tool tests for attributes required under version 1.0 of the JSON schema and for syntax errors, but does not test the accuracy of the data in the schema. It is designed to run on local computers and can be used to validate files of any size (there is no file size limit). At this point in time, the validator tool can only be used to validate JSON files.
+- Plans are linked to rates through the index's `reporting_structure`; the in-network file itself does not name plans.
+- `additional_information` on an RC price that is shaped like a CPT/HCPCS code is the procedure the facility rate applies to. This is inferred from the data and consistent across both files, but it is not defined by CMS.
+- Only in-network files are ingested; allowed-amount files are listed under `/sources` but not loaded.
+- Bundle and capitation arrangements are ingested as ordinary rates and labelled; their nested `bundled_codes` and `covered_services` are not expanded (neither file uses them).
+- Remote `provider_references` (with a `location` URL) are counted and skipped; neither file uses them.
+- Code search is exact (plus a prefix typeahead). There is no full-text search on descriptions or provider names.
 
-Schemas
-=======
-* [In-Network Rates](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/in-network-rates)
-* [Allowed Amounts](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/allowed-amounts)
-* [Table of Contents](https://github.com/CMSgov/price-transparency-guide/tree/master/schemas/table-of-contents)
+### Known limitations
 
-Examples
-========
-* [Implementation Examples](https://github.com/CMSgov/price-transparency-guide/tree/master/examples)
+- Only one payer index is configured; the design supports more, but none were tested.
+- Duplicate rate rows are skipped by the index but still kept in memory, for traceability. Compacting them would save memory.
+- No provider name, address or specialty lookup (NPPES), so individual NPIs are shown as numbers.
+- Codes that appear only as linked codes have no description in the source file, so the UI labels them "Facility rates only".
 
-Getting Involved
-================
+## What I would do with more time
 
-The healthcare ecosystem is complex with what seems like an infinite amount of plan and issuer implementations. There are no doubt going to be questions for these various situations and the requirements found in the Transparency in Coverage rule. Currently, there are two ways in which the community can get involved:
-* [Github Issues](https://guides.github.com/features/issues/) - Where people discuss issues related to the project.
-* [Github Discussions](https://github.com/CMSgov/price-transparency-guide/discussions) - Use these channels for conversational topics (for example, "How do I&hellip;" or "What do you think about&hellip;" instead of bug reports or feature requests).
+1. **Persistence:** a separate ingest job writing to Postgres (same schema), so the API restarts instantly and scales horizontally.
+2. **Snapshot cache:** serialize the built store, keyed by file SHA-256, to skip re-parsing on restart.
+3. **Scheduled refresh:** CMS files change monthly. Recheck the index and ETags, rebuild in the background, and swap atomically.
+4. **Packaging:** a Dockerfile and `docker compose up`, plus CI (go test, vitest, typecheck, lint).
+5. **Richer search:** provider names and locations via NPPES, plan-level filtering, and comparing a code across files and payers.
+6. **Full schema coverage:** bundled and capitation codes, remote provider references, and allowed-amount files.
+7. **UX:** CSV export, a price-distribution chart per code, and saved searches.
+8. **Observability:** Prometheus metrics (ingest duration, query latency histogram) and an OpenAPI spec.
 
-Before posting a comment, issue, or question, please search through existing discussions and issues. There is a good chance that the topic in questions is already being discussed.
+## Measured performance
 
-Versioning
-==========
+Measured on an 8-core laptop (Ryzen 7 260) against the real `fidelis-ex` file:
 
-With any type software development, progression happens through bug fixes, new content, or changing requirements. The technical development of this schema is no different. CMS will be following the standard versioning found in many software development projects with including a major, minor, and patch number to represent the current version of the schema. The following is the guiding principles for version updates:
+| | |
+| --- | --- |
+| Ingest `fidelis-ex`, cold (download + parse) | 3.6 s |
+| Ingest `fidelis-ex`, from cache | 0.5–2.6 s (Windows / WSL file system) |
+| Ingest both files | 4.7 s; 539,801 prices; 148 MB process |
+| Search `45380` (53 rates, 52 providers) | 0.05 ms |
+| Search `99213` (201 rates, 192 providers) | 0.34 ms |
+| Search `99213` + EIN filter | 0.004 ms |
+| Frontend bundle | 49 KB gzipped |
 
-MAJOR version when incompatible changes are introduced,
-MINOR version when attributes/values are introduced or removed in a backwards compatible manner, and
-PATCH version when backwards compatible bug fixes are introduced.
+## Repository layout
 
-The major version will be finalized to 1.0.0 for the schema to adhere to the July 2022 implementation date. Versioning of the schema can be tracked in the VERSION.md file.
+```
+server/                 Go backend (module price-explorer, stdlib only)
+  cmd/explorer/         main: config, wiring, graceful shutdown
+  internal/toc/         index parsing and file selection
+  internal/fetch/       cached, retrying downloads
+  internal/ingest/      streaming parser, normalization, builder, progress tracker
+  internal/store/       tables, indexes, interner, code and identifier rules
+  internal/search/      query validation and search (no HTTP)
+  internal/api/         handlers, middleware, error envelope
+  internal/testfixture/ shared fixture covering every data quirk
+  data/index/           bundled copy of the Fidelis index
+web/                    Vue 3 + TypeScript frontend
+  src/api/              typed client mirroring the Go contract
+  src/composables/      useRateSearch, useCodeSuggest, useStatus
+  src/components/       SearchForm, CodeTypeahead, ProviderCard, RateTable, …
+  src/lib/              validation, formatting, URL ↔ form mapping
+CMS_GUIDE.md, schemas/, examples/   original CMS implementation guide
+```
+
+## Use of AI
+
+This project was built with the help of Claude Code (Anthropic), used for data profiling, planning, implementation and testing. Design decisions, data findings and every number in this README were checked against the real files and the running application.

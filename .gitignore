@@ -1,2 +1,7 @@
 .DS_Store
 .vscode
+# price explorer
+server/bin/
+server/data/cache/
+web/node_modules/
+web/dist/
